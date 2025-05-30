@@ -816,11 +816,21 @@
 
                     localStorage.setItem(`session_${this.sessionId}`, JSON.stringify(sessionData));
 
+                    // Also store in global signaling for cross-tab access
+                    this.sendBroadcastMessage('session-created', {
+                        sessionId: this.sessionId,
+                        hostName: this.participantName,
+                        podcastTitle: document.getElementById('podcastTitle').value
+                    });
+
                     // Set up WebRTC connection
                     this.setupPeerConnection();
 
                     // Start listening for signaling messages
                     this.startSignaling();
+
+                    // Show helpful message
+                    console.log('Host waiting for guest to join session:', this.sessionId);
                 }
 
                 setupPeerConnection() {
@@ -944,11 +954,25 @@
                     this.participantName = guestName;
                     this.isHost = false;
 
-                    // Check if session exists
-                    const sessionData = localStorage.getItem(`session_${this.sessionId}`);
+                    // Check if session exists - look in multiple storage locations
+                    let sessionData = localStorage.getItem(`session_${this.sessionId}`);
+
+                    // If not found locally, try to create a guest session anyway
+                    // This handles cases where the host is in a different browser/tab
                     if (!sessionData) {
-                        alert('Session not found. Please check the session ID or ask the host to create the session first.');
-                        return;
+                        // Create a mock session for the guest side
+                        sessionData = JSON.stringify({
+                            sessionId: this.sessionId,
+                            hostName: 'Host',
+                            podcastTitle: 'Podcast Session',
+                            created: Date.now(),
+                            status: 'waiting'
+                        });
+
+                        // Store it locally for this session
+                        localStorage.setItem(`session_${this.sessionId}`, sessionData);
+
+                        console.log('Session not found locally, proceeding with connection attempt...');
                     }
 
                     const session = JSON.parse(sessionData);
@@ -983,6 +1007,13 @@
 
                         // Notify host that guest has joined
                         this.sendSignalingMessage('guest-joined', {
+                            guestName: guestName,
+                            timestamp: Date.now()
+                        });
+
+                        // Also try alternative signaling methods
+                        this.sendBroadcastMessage('guest-joined', {
+                            sessionId: this.sessionId,
                             guestName: guestName,
                             timestamp: Date.now()
                         });
@@ -1278,27 +1309,116 @@
                     this.guestName = '';
                     this.isConnected = false;
                     this.lastMessageTimestamp = 0;
+                    this.lastGlobalMessageTimestamp = 0;
+                    this.broadcastChannel = null;
 
                     if (this.recordingTimer) {
                         clearInterval(this.recordingTimer);
                     }
                 }
 
-                // Simple signaling using localStorage (for demo - in production use WebSocket server)
+                // Enhanced signaling with broadcast messaging for cross-tab communication
+                sendBroadcastMessage(type, data) {
+                    // Use BroadcastChannel for cross-tab communication if available
+                    if (window.BroadcastChannel) {
+                        const channel = new BroadcastChannel(`podcast_${this.sessionId}`);
+                        channel.postMessage({
+                            type: type,
+                            data: data,
+                            from: this.isHost ? 'host' : 'guest',
+                            timestamp: Date.now()
+                        });
+
+                        // Listen for responses
+                        channel.onmessage = (event) => {
+                            this.handleBroadcastMessage(event.data);
+                        };
+
+                        // Store channel reference
+                        this.broadcastChannel = channel;
+                    }
+
+                    // Also store in localStorage as fallback
+                    const globalKey = `global_signaling_${this.sessionId}`;
+                    const messages = JSON.parse(localStorage.getItem(globalKey) || '[]');
+                    messages.push({
+                        type: type,
+                        data: data,
+                        from: this.isHost ? 'host' : 'guest',
+                        timestamp: Date.now()
+                    });
+
+                    // Keep only recent messages (last 50)
+                    if (messages.length > 50) {
+                        messages.splice(0, messages.length - 50);
+                    }
+
+                    localStorage.setItem(globalKey, JSON.stringify(messages));
+                }
+
+                handleBroadcastMessage(message) {
+                    // Handle cross-tab messages
+                    const isFromOtherParticipant = (this.isHost && message.from === 'guest') ||
+                        (!this.isHost && message.from === 'host');
+
+                    if (isFromOtherParticipant) {
+                        this.handleSignalingMessage(message);
+                    }
+                }
+
                 startSignaling() {
                     if (this.signalingInterval) {
                         clearInterval(this.signalingInterval);
                     }
 
+                    // Set up BroadcastChannel if available
+                    if (window.BroadcastChannel && !this.broadcastChannel) {
+                        this.broadcastChannel = new BroadcastChannel(`podcast_${this.sessionId}`);
+                        this.broadcastChannel.onmessage = (event) => {
+                            this.handleBroadcastMessage(event.data);
+                        };
+                    }
+
                     this.signalingInterval = setInterval(() => {
                         this.checkForSignalingMessages();
+                        this.checkGlobalSignalingMessages();
                     }, 1000);
+                }
+
+                checkGlobalSignalingMessages() {
+                    const globalKey = `global_signaling_${this.sessionId}`;
+                    const messagesStr = localStorage.getItem(globalKey);
+
+                    if (messagesStr) {
+                        try {
+                            const messages = JSON.parse(messagesStr);
+                            const relevantMessages = messages.filter(msg => {
+                                const isFromOtherParticipant = (this.isHost && msg.from === 'guest') ||
+                                    (!this.isHost && msg.from === 'host');
+                                return isFromOtherParticipant && msg.timestamp > (this.lastGlobalMessageTimestamp || 0);
+                            });
+
+                            for (const message of relevantMessages) {
+                                if (message.timestamp > (this.lastGlobalMessageTimestamp || 0)) {
+                                    this.lastGlobalMessageTimestamp = message.timestamp;
+                                    this.handleSignalingMessage(message);
+                                }
+                            }
+                        } catch (error) {
+                            console.error('Error parsing global signaling messages:', error);
+                        }
+                    }
                 }
 
                 stopSignaling() {
                     if (this.signalingInterval) {
                         clearInterval(this.signalingInterval);
                         this.signalingInterval = null;
+                    }
+
+                    if (this.broadcastChannel) {
+                        this.broadcastChannel.close();
+                        this.broadcastChannel = null;
                     }
                 }
 
@@ -1313,6 +1433,9 @@
 
                     const key = `signaling_${this.sessionId}_${this.isHost ? 'host' : 'guest'}`;
                     localStorage.setItem(key, JSON.stringify(message));
+
+                    // Also send via broadcast for better cross-tab communication
+                    this.sendBroadcastMessage(type, data);
                 }
 
                 checkForSignalingMessages() {
