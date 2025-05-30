@@ -1078,62 +1078,88 @@
                         await this.initializeLocalMedia();
                         console.log('✅ Guest media initialized successfully');
 
-                        // Create session data for guest
-                        const sessionData = {
-                            sessionId: this.sessionId,
-                            hostName: 'Host',
-                            podcastTitle: 'Podcast Session',
-                            created: Date.now(),
-                            status: 'active'
-                        };
-
-                        // Store session data locally
-                        localStorage.setItem(`session_${this.sessionId}`, JSON.stringify(sessionData));
-
-                        // Show session interface
+                        // Show session interface immediately
                         this.showSessionInterface();
+                        this.updateConnectionStatus('connecting', 'Looking for host...');
 
-                        // Set up videos correctly for guest view
+                        // Set up videos for guest view
                         const hostVideo = document.getElementById('hostVideo');
                         const guestVideo = document.getElementById('guestVideo');
 
-                        // Guest's own video goes in the guest slot
-                        console.log('🎬 Setting up guest video feed...');
+                        // Guest's own video
                         guestVideo.srcObject = this.localStream;
                         guestVideo.muted = true;
 
-                        // Set placeholder for host video initially
+                        // Placeholder for host video
                         hostVideo.style.background = 'linear-gradient(45deg, #667eea, #764ba2)';
-                        hostVideo.innerHTML = '<div style="display: flex; align-items: center; justify-content: center; height: 100%; color: white; font-size: 1.5em;">🎤 Waiting for Host...</div>';
+                        hostVideo.innerHTML = '<div style="display: flex; align-items: center; justify-content: center; height: 100%; color: white; font-size: 1.5em;">🔍 Looking for host...</div>';
 
                         // Update labels
-                        document.getElementById('hostLabel').textContent = 'Host';
                         document.getElementById('guestLabel').textContent = `You (${guestName})`;
-
-                        this.updateConnectionStatus('connecting', 'Connecting to host...');
+                        document.getElementById('hostLabel').textContent = 'Host';
 
                         // Set up WebRTC connection BEFORE signaling
                         console.log('🔗 Guest setting up peer connection...');
                         this.setupPeerConnection();
 
-                        // Start signaling
+                        // Start signaling and look for host
                         console.log('📡 Guest starting signaling...');
                         this.startSignaling();
 
-                        // Wait a moment for signaling to initialize
-                        setTimeout(() => {
-                            // Notify host that guest has joined
-                            console.log('📨 Guest sending join notification to host...');
+                        // Look for existing host session data
+                        this.lookForHostSession();
+
+                        // Announce guest presence immediately and repeatedly
+                        const announceGuest = () => {
+                            console.log('📢 Guest announcing presence...');
                             this.sendSignalingMessage('guest-joined', {
                                 guestName: guestName,
                                 timestamp: Date.now()
                             });
-                        }, 1000);
+
+                            this.sendSignalingMessage('guest-looking', {
+                                guestName: guestName,
+                                sessionId: this.sessionId,
+                                timestamp: Date.now()
+                            });
+                        };
+
+                        // Announce immediately and then every 2 seconds
+                        announceGuest();
+                        this.guestAnnouncementInterval = setInterval(announceGuest, 2000);
+
+                        // Update status
+                        this.updateConnectionStatus('connecting', 'Announcing presence to host...');
 
                     } catch (error) {
                         console.error('❌ Error joining session:', error);
                         alert('Could not access camera/microphone. Please check permissions and try again.');
                     }
+                }
+
+                lookForHostSession() {
+                    // Check multiple possible locations for host session
+                    const possibleKeys = [
+                        `session_${this.sessionId}`,
+                        `host_session_${this.sessionId}`
+                    ];
+
+                    for (const key of possibleKeys) {
+                        const sessionData = localStorage.getItem(key);
+                        if (sessionData) {
+                            try {
+                                const session = JSON.parse(sessionData);
+                                console.log('🎯 Found host session data:', session);
+                                document.getElementById('sessionTitle').textContent = session.podcastTitle;
+                                document.getElementById('hostLabel').textContent = session.hostName;
+                                this.updateConnectionStatus('connecting', `Found ${session.hostName}, connecting...`);
+                                return true;
+                            } catch (error) {
+                                console.error('Error parsing session data:', error);
+                            }
+                        }
+                    }
+                    return false;
                 }
 
                 showSessionInterface() {
@@ -1370,6 +1396,19 @@
 
                 endSession() {
                     if (confirm('Are you sure you want to end the session?')) {
+                        console.log('🛑 Ending session');
+
+                        // Stop announcement intervals
+                        if (this.hostAnnouncementInterval) {
+                            clearInterval(this.hostAnnouncementInterval);
+                            this.hostAnnouncementInterval = null;
+                        }
+
+                        if (this.guestAnnouncementInterval) {
+                            clearInterval(this.guestAnnouncementInterval);
+                            this.guestAnnouncementInterval = null;
+                        }
+
                         // Notify other participant
                         if (!this.isHost) {
                             this.sendSignalingMessage('guest-disconnected', { timestamp: Date.now() });
@@ -1396,8 +1435,10 @@
                         // Clean up session data if host
                         if (this.isHost && this.sessionId) {
                             localStorage.removeItem(`session_${this.sessionId}`);
+                            localStorage.removeItem(`host_session_${this.sessionId}`);
                             localStorage.removeItem(`signaling_${this.sessionId}_host`);
                             localStorage.removeItem(`signaling_${this.sessionId}_guest`);
+                            localStorage.removeItem(`global_signaling_${this.sessionId}`);
                         }
 
                         // Reset to welcome screen
@@ -1516,6 +1557,37 @@
                     }, 1000);
                 }
 
+                checkForSignalingMessages() {
+                    const senderType = this.isHost ? 'guest' : 'host';
+                    const key = `signaling_${this.sessionId}_${senderType}`;
+                    const messageStr = localStorage.getItem(key);
+
+                    if (messageStr) {
+                        try {
+                            const message = JSON.parse(messageStr);
+                            const messageKey = `${message.type}_${message.timestamp}`;
+
+                            // Avoid processing the same message multiple times
+                            if (!this.processedMessages) {
+                                this.processedMessages = new Set();
+                            }
+
+                            if (!this.processedMessages.has(messageKey)) {
+                                this.processedMessages.add(messageKey);
+                                console.log('📥 Processing stored message:', message.type);
+                                this.handleSignalingMessage(message);
+
+                                // Clean up old processed messages
+                                if (this.processedMessages.size > 50) {
+                                    this.processedMessages.clear();
+                                }
+                            }
+                        } catch (error) {
+                            console.error('Error parsing signaling message:', error);
+                        }
+                    }
+                }
+
                 checkGlobalSignalingMessages() {
                     const globalKey = `global_signaling_${this.sessionId}`;
                     const messagesStr = localStorage.getItem(globalKey);
@@ -1526,12 +1598,18 @@
                             const relevantMessages = messages.filter(msg => {
                                 const isFromOtherParticipant = (this.isHost && msg.from === 'guest') ||
                                     (!this.isHost && msg.from === 'host');
-                                return isFromOtherParticipant && msg.timestamp > (this.lastGlobalMessageTimestamp || 0);
+                                return isFromOtherParticipant;
                             });
 
+                            if (!this.processedMessages) {
+                                this.processedMessages = new Set();
+                            }
+
                             for (const message of relevantMessages) {
-                                if (message.timestamp > (this.lastGlobalMessageTimestamp || 0)) {
-                                    this.lastGlobalMessageTimestamp = message.timestamp;
+                                const messageKey = `${message.type}_${message.timestamp}`;
+                                if (!this.processedMessages.has(messageKey)) {
+                                    this.processedMessages.add(messageKey);
+                                    console.log('📥 Processing global message:', message.type);
                                     this.handleSignalingMessage(message);
                                 }
                             }
@@ -1588,32 +1666,60 @@
                 }
 
                 async handleSignalingMessage(message) {
-                    console.log('📨 Received signaling message:', message.type, 'from:', message.from);
+                    console.log(`📨 Received signaling message: ${message.type} from ${message.from}`);
 
                     // Ensure we have a peer connection before processing messages
                     if (!this.peerConnection) {
-                        console.log('No peer connection yet, setting up...');
+                        console.log('⚠️ No peer connection yet, setting up...');
                         this.setupPeerConnection();
                     }
 
                     switch (message.type) {
+                        case 'session-ready':
+                        case 'host-ready':
+                            if (!this.isHost) {
+                                console.log('🎯 Guest found host ready signal');
+                                document.getElementById('sessionTitle').textContent = message.data.podcastTitle || 'Podcast Session';
+                                document.getElementById('hostLabel').textContent = message.data.hostName || 'Host';
+                                this.updateConnectionStatus('connecting', `Found ${message.data.hostName}, connecting...`);
+
+                                // Clear the looking placeholder
+                                const hostVideo = document.getElementById('hostVideo');
+                                hostVideo.innerHTML = '<div style="display: flex; align-items: center; justify-content: center; height: 100%; color: white; font-size: 1.5em;">🎤 Host Found - Connecting...</div>';
+                            }
+                            break;
+
                         case 'guest-joined':
+                        case 'guest-looking':
                             if (this.isHost) {
-                                console.log('👥 Host received guest-joined message');
+                                console.log('👥 Host received guest presence signal');
                                 this.guestName = message.data.guestName;
                                 this.onGuestJoined();
 
-                                // Wait a bit for guest to set up their peer connection
+                                // Clear host announcement interval
+                                if (this.hostAnnouncementInterval) {
+                                    clearInterval(this.hostAnnouncementInterval);
+                                    this.hostAnnouncementInterval = null;
+                                }
+
+                                // Start WebRTC offer creation with delay
                                 setTimeout(async () => {
                                     console.log('🎬 Host starting WebRTC offer creation...');
                                     await this.createOffer();
-                                }, 2000);
+                                }, 1000);
                             }
                             break;
 
                         case 'offer':
                             if (!this.isHost) {
                                 console.log('📥 Guest received offer from host');
+
+                                // Clear guest announcement interval
+                                if (this.guestAnnouncementInterval) {
+                                    clearInterval(this.guestAnnouncementInterval);
+                                    this.guestAnnouncementInterval = null;
+                                }
+
                                 await this.handleOffer(message.data);
                             }
                             break;
@@ -1634,25 +1740,6 @@
                             if (this.isHost) {
                                 console.log('👋 Guest disconnected');
                                 this.onGuestDisconnected();
-                            }
-                            break;
-
-                        case 'session-created':
-                            if (!this.isHost) {
-                                console.log('🎙️ Guest found session created message');
-                                // Update session info if guest finds host session
-                                const sessionData = {
-                                    sessionId: message.data.sessionId,
-                                    hostName: message.data.hostName,
-                                    podcastTitle: message.data.podcastTitle,
-                                    created: Date.now(),
-                                    status: 'active'
-                                };
-                                localStorage.setItem(`session_${message.data.sessionId}`, JSON.stringify(sessionData));
-
-                                // Update UI with proper session info
-                                document.getElementById('sessionTitle').textContent = message.data.podcastTitle;
-                                document.getElementById('hostLabel').textContent = message.data.hostName;
                             }
                             break;
                     }
