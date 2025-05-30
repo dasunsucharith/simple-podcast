@@ -954,36 +954,30 @@
                     this.participantName = guestName;
                     this.isHost = false;
 
-                    // Check if session exists - look in multiple storage locations
-                    let sessionData = localStorage.getItem(`session_${this.sessionId}`);
+                    console.log('Guest attempting to join session:', this.sessionId);
 
-                    // If not found locally, try to create a guest session anyway
-                    // This handles cases where the host is in a different browser/tab
-                    if (!sessionData) {
-                        // Create a mock session for the guest side
-                        sessionData = JSON.stringify({
+                    try {
+                        // Initialize media first
+                        await this.initializeLocalMedia();
+                        console.log('Guest media initialized successfully');
+
+                        // Create mock session data for guest
+                        const sessionData = {
                             sessionId: this.sessionId,
                             hostName: 'Host',
                             podcastTitle: 'Podcast Session',
                             created: Date.now(),
-                            status: 'waiting'
-                        });
+                            status: 'active'
+                        };
 
-                        // Store it locally for this session
-                        localStorage.setItem(`session_${this.sessionId}`, sessionData);
+                        // Store session data locally
+                        localStorage.setItem(`session_${this.sessionId}`, JSON.stringify(sessionData));
 
-                        console.log('Session not found locally, proceeding with connection attempt...');
-                    }
-
-                    const session = JSON.parse(sessionData);
-                    this.guestName = session.hostName;
-
-                    try {
-                        await this.initializeLocalMedia();
+                        // Show session interface
                         this.showSessionInterface();
 
-                        // Set session title from host's session
-                        document.getElementById('sessionTitle').textContent = session.podcastTitle;
+                        // Set session title
+                        document.getElementById('sessionTitle').textContent = sessionData.podcastTitle;
 
                         this.updateConnectionStatus('connecting', 'Connecting to host...');
 
@@ -995,8 +989,12 @@
                         guestVideo.srcObject = this.localStream;
                         guestVideo.muted = true;
 
+                        // Set placeholder for host video initially
+                        hostVideo.style.background = 'linear-gradient(45deg, #667eea, #764ba2)';
+                        hostVideo.innerHTML = '<div style="display: flex; align-items: center; justify-content: center; height: 100%; color: white; font-size: 1.5em;">🎤 Waiting for Host...</div>';
+
                         // Update labels
-                        document.getElementById('hostLabel').textContent = session.hostName;
+                        document.getElementById('hostLabel').textContent = 'Host';
                         document.getElementById('guestLabel').textContent = `You (${guestName})`;
 
                         // Set up WebRTC connection
@@ -1006,39 +1004,56 @@
                         this.startSignaling();
 
                         // Notify host that guest has joined
+                        console.log('Sending guest-joined message');
                         this.sendSignalingMessage('guest-joined', {
                             guestName: guestName,
                             timestamp: Date.now()
                         });
 
-                        // Also try alternative signaling methods
-                        this.sendBroadcastMessage('guest-joined', {
-                            sessionId: this.sessionId,
-                            guestName: guestName,
-                            timestamp: Date.now()
-                        });
+                        // Force UI update
+                        setTimeout(() => {
+                            document.getElementById('sessionInterface').style.display = 'block';
+                            document.getElementById('welcomeScreen').style.display = 'none';
+                        }, 100);
 
                     } catch (error) {
                         console.error('Error joining session:', error);
-                        alert('Could not join session. Please check your connection and try again.');
+                        alert('Could not access camera/microphone. Please check permissions and try again.');
                     }
                 }
 
                 showSessionInterface() {
+                    console.log('Showing session interface, isHost:', this.isHost);
+
+                    // Hide all other sections
                     document.getElementById('welcomeScreen').classList.add('hidden');
                     document.getElementById('sessionSetup').classList.add('hidden');
                     document.getElementById('deviceTesting').classList.add('hidden');
-                    document.getElementById('sessionInterface').classList.remove('hidden');
+
+                    // Show session interface
+                    const sessionInterface = document.getElementById('sessionInterface');
+                    sessionInterface.classList.remove('hidden');
+                    sessionInterface.style.display = 'block';
 
                     // Set session title
-                    const title = document.getElementById('podcastTitle').value || 'Simple Podcast Session';
+                    const title = document.getElementById('podcastTitle')?.value || 'Simple Podcast Session';
                     document.getElementById('sessionTitle').textContent = title;
 
-                    // Setup host video
-                    if (this.isHost) {
+                    // Setup host video if host
+                    if (this.isHost && this.localStream) {
                         const hostVideo = document.getElementById('hostVideo');
                         hostVideo.srcObject = this.localStream;
+                        hostVideo.muted = true;
+                        document.getElementById('hostLabel').textContent = `You (${this.participantName})`;
+                        document.getElementById('guestLabel').textContent = 'Waiting for Guest...';
+
+                        // Set placeholder for guest video
+                        const guestVideo = document.getElementById('guestVideo');
+                        guestVideo.style.background = 'linear-gradient(45deg, #333, #555)';
+                        guestVideo.innerHTML = '<div style="display: flex; align-items: center; justify-content: center; height: 100%; color: white; font-size: 1.5em;">👥 Waiting for guest...</div>';
                     }
+
+                    console.log('Session interface should now be visible');
                 }
 
                 updateConnectionStatus(status, text) {
