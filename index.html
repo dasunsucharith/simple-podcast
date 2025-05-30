@@ -635,6 +635,12 @@
                     this.sessionId = null;
                     this.participantName = '';
                     this.recordingStartTime = null;
+                    this.guestName = '';
+                    this.isConnected = false;
+
+                    // Session storage for peer-to-peer signaling
+                    this.sessionData = null;
+                    this.signalingInterval = null;
 
                     // WebRTC Configuration
                     this.rtcConfig = {
@@ -799,49 +805,128 @@
                     this.showSessionInterface();
                     this.updateConnectionStatus('connecting', 'Waiting for guest...');
 
-                    // Simulate WebRTC connection setup
+                    // Set up session data in localStorage
+                    const sessionData = {
+                        sessionId: this.sessionId,
+                        hostName: this.participantName,
+                        podcastTitle: document.getElementById('podcastTitle').value,
+                        created: Date.now(),
+                        status: 'waiting'
+                    };
+
+                    localStorage.setItem(`session_${this.sessionId}`, JSON.stringify(sessionData));
+
+                    // Set up WebRTC connection
                     this.setupPeerConnection();
 
-                    // For demo purposes, simulate a guest joining after 3 seconds
-                    setTimeout(() => {
-                        this.simulateGuestJoining();
-                    }, 3000);
+                    // Start listening for signaling messages
+                    this.startSignaling();
                 }
 
                 setupPeerConnection() {
                     this.peerConnection = new RTCPeerConnection(this.rtcConfig);
 
                     // Add local stream tracks
-                    this.localStream.getTracks().forEach(track => {
-                        this.peerConnection.addTrack(track, this.localStream);
-                    });
+                    if (this.localStream) {
+                        this.localStream.getTracks().forEach(track => {
+                            this.peerConnection.addTrack(track, this.localStream);
+                        });
+                    }
 
                     // Handle remote stream
                     this.peerConnection.ontrack = (event) => {
+                        console.log('Received remote stream');
                         this.remoteStream = event.streams[0];
-                        const guestVideo = document.getElementById('guestVideo');
-                        guestVideo.srcObject = this.remoteStream;
+                        const remoteVideo = this.isHost ?
+                            document.getElementById('guestVideo') :
+                            document.getElementById('hostVideo');
+                        remoteVideo.srcObject = this.remoteStream;
+
+                        if (!this.isConnected) {
+                            this.isConnected = true;
+                            this.updateConnectionStatus('connected', 'Connected');
+                            if (!this.isHost) {
+                                document.getElementById('hostLabel').textContent = this.guestName || 'Host';
+                            }
+                        }
+                    };
+
+                    // Handle ICE candidates
+                    this.peerConnection.onicecandidate = (event) => {
+                        if (event.candidate) {
+                            this.sendSignalingMessage('ice-candidate', event.candidate);
+                        }
                     };
 
                     // Handle connection state changes
                     this.peerConnection.onconnectionstatechange = () => {
                         const state = this.peerConnection.connectionState;
+                        console.log('Connection state:', state);
+
                         if (state === 'connected') {
                             this.updateConnectionStatus('connected', 'Connected');
                         } else if (state === 'disconnected' || state === 'failed') {
                             this.updateConnectionStatus('disconnected', 'Connection lost');
+                        } else if (state === 'connecting') {
+                            this.updateConnectionStatus('connecting', 'Connecting...');
                         }
                     };
                 }
 
-                simulateGuestJoining() {
-                    // For demo purposes - simulate guest video
-                    const guestVideo = document.getElementById('guestVideo');
-                    guestVideo.style.background = 'linear-gradient(45deg, #FF6B6B, #4ECDC4)';
-                    guestVideo.innerHTML = '<div style="display: flex; align-items: center; justify-content: center; height: 100%; color: white; font-size: 2em;">🎭 Guest Camera</div>';
+                async createOffer() {
+                    try {
+                        const offer = await this.peerConnection.createOffer();
+                        await this.peerConnection.setLocalDescription(offer);
+                        this.sendSignalingMessage('offer', offer);
+                        console.log('Offer created and sent');
+                    } catch (error) {
+                        console.error('Error creating offer:', error);
+                    }
+                }
 
-                    this.updateConnectionStatus('connected', 'Guest connected');
-                    document.getElementById('guestLabel').textContent = 'Guest User';
+                async handleOffer(offer) {
+                    try {
+                        await this.peerConnection.setRemoteDescription(offer);
+                        const answer = await this.peerConnection.createAnswer();
+                        await this.peerConnection.setLocalDescription(answer);
+                        this.sendSignalingMessage('answer', answer);
+                        console.log('Answer created and sent');
+                    } catch (error) {
+                        console.error('Error handling offer:', error);
+                    }
+                }
+
+                async handleAnswer(answer) {
+                    try {
+                        await this.peerConnection.setRemoteDescription(answer);
+                        console.log('Answer processed');
+                    } catch (error) {
+                        console.error('Error handling answer:', error);
+                    }
+                }
+
+                async handleIceCandidate(candidate) {
+                    try {
+                        await this.peerConnection.addIceCandidate(candidate);
+                        console.log('ICE candidate added');
+                    } catch (error) {
+                        console.error('Error adding ICE candidate:', error);
+                    }
+                }
+
+                onGuestJoined() {
+                    console.log('Guest joined:', this.guestName);
+                    this.updateConnectionStatus('connecting', `${this.guestName} is connecting...`);
+                    document.getElementById('guestLabel').textContent = this.guestName;
+                }
+
+                onGuestDisconnected() {
+                    console.log('Guest disconnected');
+                    this.updateConnectionStatus('disconnected', 'Guest disconnected');
+                    const guestVideo = document.getElementById('guestVideo');
+                    guestVideo.srcObject = null;
+                    guestVideo.style.background = 'linear-gradient(45deg, #333, #555)';
+                    guestVideo.innerHTML = '<div style="display: flex; align-items: center; justify-content: center; height: 100%; color: white; font-size: 1.5em;">Guest Disconnected</div>';
                 }
 
                 async joinSession() {
@@ -859,28 +944,48 @@
                     this.participantName = guestName;
                     this.isHost = false;
 
+                    // Check if session exists
+                    const sessionData = localStorage.getItem(`session_${this.sessionId}`);
+                    if (!sessionData) {
+                        alert('Session not found. Please check the session ID or ask the host to create the session first.');
+                        return;
+                    }
+
+                    const session = JSON.parse(sessionData);
+                    this.guestName = session.hostName;
+
                     try {
                         await this.initializeLocalMedia();
                         this.showSessionInterface();
+
+                        // Set session title from host's session
+                        document.getElementById('sessionTitle').textContent = session.podcastTitle;
+
                         this.updateConnectionStatus('connecting', 'Connecting to host...');
 
-                        // Set up host video as local and guest video as "You"
+                        // Set up videos correctly for guest view
                         const hostVideo = document.getElementById('hostVideo');
                         const guestVideo = document.getElementById('guestVideo');
 
+                        // Guest's own video goes in the guest slot
                         guestVideo.srcObject = this.localStream;
                         guestVideo.muted = true;
 
-                        // Simulate host video
-                        hostVideo.style.background = 'linear-gradient(45deg, #667eea, #764ba2)';
-                        hostVideo.innerHTML = '<div style="display: flex; align-items: center; justify-content: center; height: 100%; color: white; font-size: 2em;">🎤 Host Camera</div>';
-
-                        document.getElementById('hostLabel').textContent = 'Host';
+                        // Update labels
+                        document.getElementById('hostLabel').textContent = session.hostName;
                         document.getElementById('guestLabel').textContent = `You (${guestName})`;
 
-                        setTimeout(() => {
-                            this.updateConnectionStatus('connected', 'Connected to host');
-                        }, 2000);
+                        // Set up WebRTC connection
+                        this.setupPeerConnection();
+
+                        // Start signaling
+                        this.startSignaling();
+
+                        // Notify host that guest has joined
+                        this.sendSignalingMessage('guest-joined', {
+                            guestName: guestName,
+                            timestamp: Date.now()
+                        });
 
                     } catch (error) {
                         console.error('Error joining session:', error);
@@ -1103,6 +1208,14 @@
 
                 endSession() {
                     if (confirm('Are you sure you want to end the session?')) {
+                        // Notify other participant
+                        if (!this.isHost) {
+                            this.sendSignalingMessage('guest-disconnected', { timestamp: Date.now() });
+                        }
+
+                        // Stop signaling
+                        this.stopSignaling();
+
                         // Stop recording if active
                         if (this.isRecording) {
                             this.stopRecording();
@@ -1118,12 +1231,22 @@
                             this.localStream.getTracks().forEach(track => track.stop());
                         }
 
+                        // Clean up session data if host
+                        if (this.isHost && this.sessionId) {
+                            localStorage.removeItem(`session_${this.sessionId}`);
+                            localStorage.removeItem(`signaling_${this.sessionId}_host`);
+                            localStorage.removeItem(`signaling_${this.sessionId}_guest`);
+                        }
+
                         // Reset to welcome screen
                         this.resetToWelcome();
                     }
                 }
 
                 resetToWelcome() {
+                    // Stop signaling
+                    this.stopSignaling();
+
                     // Hide all sections
                     document.getElementById('sessionSetup').classList.add('hidden');
                     document.getElementById('deviceTesting').classList.add('hidden');
@@ -1152,9 +1275,97 @@
                     this.sessionId = null;
                     this.participantName = '';
                     this.recordingStartTime = null;
+                    this.guestName = '';
+                    this.isConnected = false;
+                    this.lastMessageTimestamp = 0;
 
                     if (this.recordingTimer) {
                         clearInterval(this.recordingTimer);
+                    }
+                }
+
+                // Simple signaling using localStorage (for demo - in production use WebSocket server)
+                startSignaling() {
+                    if (this.signalingInterval) {
+                        clearInterval(this.signalingInterval);
+                    }
+
+                    this.signalingInterval = setInterval(() => {
+                        this.checkForSignalingMessages();
+                    }, 1000);
+                }
+
+                stopSignaling() {
+                    if (this.signalingInterval) {
+                        clearInterval(this.signalingInterval);
+                        this.signalingInterval = null;
+                    }
+                }
+
+                sendSignalingMessage(type, data) {
+                    const message = {
+                        type: type,
+                        data: data,
+                        from: this.isHost ? 'host' : 'guest',
+                        timestamp: Date.now(),
+                        sessionId: this.sessionId
+                    };
+
+                    const key = `signaling_${this.sessionId}_${this.isHost ? 'host' : 'guest'}`;
+                    localStorage.setItem(key, JSON.stringify(message));
+                }
+
+                checkForSignalingMessages() {
+                    const senderType = this.isHost ? 'guest' : 'host';
+                    const key = `signaling_${this.sessionId}_${senderType}`;
+                    const messageStr = localStorage.getItem(key);
+
+                    if (messageStr) {
+                        try {
+                            const message = JSON.parse(messageStr);
+                            if (message.timestamp > (this.lastMessageTimestamp || 0)) {
+                                this.lastMessageTimestamp = message.timestamp;
+                                this.handleSignalingMessage(message);
+                            }
+                        } catch (error) {
+                            console.error('Error parsing signaling message:', error);
+                        }
+                    }
+                }
+
+                async handleSignalingMessage(message) {
+                    console.log('Received signaling message:', message.type);
+
+                    switch (message.type) {
+                        case 'guest-joined':
+                            if (this.isHost) {
+                                this.guestName = message.data.guestName;
+                                this.onGuestJoined();
+                                await this.createOffer();
+                            }
+                            break;
+
+                        case 'offer':
+                            if (!this.isHost) {
+                                await this.handleOffer(message.data);
+                            }
+                            break;
+
+                        case 'answer':
+                            if (this.isHost) {
+                                await this.handleAnswer(message.data);
+                            }
+                            break;
+
+                        case 'ice-candidate':
+                            await this.handleIceCandidate(message.data);
+                            break;
+
+                        case 'guest-disconnected':
+                            if (this.isHost) {
+                                this.onGuestDisconnected();
+                            }
+                            break;
                     }
                 }
             }
